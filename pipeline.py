@@ -1,16 +1,19 @@
-"""finalCut Pipeline Orchestrator —— 每支影片獨立目錄。
+"""finalCut Pipeline Orchestrator —— 每支影片獨立目錄,依日期時間區分。
 
-用 per-video 目錄隔離每支影片的中間檔與成品,
-讓 Claude Code 的 /finalCut skill 可以自動化呼叫。
+每次執行 pipeline 都會產生一組 run-id,格式:
+  workspace/YYYY-MM-DD/HHmm_<video-name>/
+
+這樣同一支影片多次後製也不會互相蓋掉,而且一目瞭然。
 
 Usage (給 Claude 用,非手動執行):
-  python pipeline.py transcribe <video-name>
-  python pipeline.py build <video-name> --visuals <json-file>
-  python pipeline.py render <video-name> [--frames 起-迄]
+  python pipeline.py transcribe <video-name> [--run-id <id>]
+  python pipeline.py build <video-name> --run-id <id> --visuals <json-file> [--chapters <json-file>]
+  python pipeline.py render <video-name> --run-id <id> [--frames 起-迄]
 """
 from __future__ import annotations
 
 import argparse
+import datetime
 import json
 import shutil
 import sys
@@ -82,26 +85,42 @@ def find_video(name: str) -> Path:
     sys.exit(1)
 
 
-def video_dir(name: str) -> Path:
-    """回傳 workspace/<name>/ 並確保存在。"""
-    d = WORK_DIR / name
+# ── Run ID (日期/時間區分) ─────────────────────
+
+def generate_run_id(video_name: str) -> str:
+    """產生 run-id: YYYY-MM-DD/HHmm_video_name
+
+    目錄結構: workspace/YYYY-MM-DD/HHmm_video_name/
+    這樣按日期分層、按時間區分同支影片的多輪後製。
+    """
+    now = datetime.datetime.now()
+    return f"{now.strftime('%Y-%m-%d')}/{now.strftime('%H%M')}_{video_name}"
+
+
+def run_dir(run_id: str) -> Path:
+    """回傳 workspace/<run_id>/ 並確保存在。"""
+    d = WORK_DIR / run_id
     d.mkdir(parents=True, exist_ok=True)
     return d
 
 
-# ── 指令實作 ──────────────────────────────────
+# ── 指令實作 ─────────────────────────────────
 
-def cmd_transcribe(video_name: str) -> dict:
+def cmd_transcribe(video_name: str, run_id: str | None = None) -> dict:
     """轉字幕: 抽音軌 → Whisper → SRT。
 
-    產出:
-      workspace/<name>/audio.wav
-      workspace/<name>/subtitles_raw.srt
+    產出(在 workspace/<run_id>/ 下):
+      <video>.mp4         # 影片副本
+      audio.wav           # 抽出的音軌
+      subtitles_raw.srt   # Whisper 原始字幕
 
-    回傳 dict { video_path, srt_path, segments_count } 供後續步驟用。
+    回傳 dict { run_id, out_dir, srt_path, segments_count }。
     """
+    if run_id is None:
+        run_id = generate_run_id(video_name)
+
     video_path = find_video(video_name)
-    out_dir = video_dir(video_name)
+    out_dir = run_dir(run_id)
     video_copy = out_dir / video_path.name
 
     # 把影片複製進工作目錄(讓一切自含)
@@ -112,7 +131,7 @@ def cmd_transcribe(video_name: str) -> dict:
     print(f"  🎵 抽音軌…")
     audio_path = extract_audio(video_copy)
 
-    # extract_audio 把 wav 產在 WORK_DIR/,搬進 per-video 目錄
+    # extract_audio 把 wav 產在 WORK_DIR/,搬進 run 目錄
     old_audio = WORK_DIR / f"{video_copy.stem}.wav"
     target_audio = out_dir / "audio.wav"
     if old_audio.exists():
@@ -132,26 +151,33 @@ def cmd_transcribe(video_name: str) -> dict:
     print(f"  ✅ 共 {len(segments)} 句,已寫入 {srt_path}")
 
     return {
+        "run_id": run_id,
+        "out_dir": str(out_dir),
         "video_path": str(video_copy),
         "srt_path": str(srt_path),
         "segments_count": len(segments),
-        "out_dir": str(out_dir),
     }
 
 
 def cmd_build(
     video_name: str,
+    run_id: str,
     visuals_file: str | None = None,
     chapters_file: str | None = None,
 ) -> dict:
     """組 composition: 讀校正後字幕 + visuals → 產 props.json。
 
-    預設讀 workspace/<name>/subtitles_corrected.srt,
+    預設讀 workspace/<run_id>/subtitles_corrected.srt,
     若不存在則退回 subtitles_raw.srt。
+
+    props.json 產在:
+      1. workspace/<run_id>/props.json (永久保存)
+      2. remotion/props.json          (供 Remotion Studio 即時預覽)
+      3. remotion/props.example.json   (供 Studio 預覽)
 
     visuals 與 chapters 用 JSON 檔案傳入(由 Claude 產出)。
     """
-    out_dir = video_dir(video_name)
+    out_dir = run_dir(run_id)
     video_copy = out_dir / f"{video_name}.mp4"
 
     # 找影片(可能已被複製過來,也可能還沒)
@@ -195,32 +221,45 @@ def cmd_build(
             print(f"  ⚠️ chapters 檔不存在: {chapters_file},跳過")
 
     print(f"  🔧 組 composition…")
-    props_path = build_composition(video_copy, segments, visuals, chapters)
 
-    # 也蓋 props.example.json(供 Remotion Studio 即時預覽)
+    # 寫入 run 目錄 (永久保存)
+    run_props = out_dir / "props.json"
+    build_composition(
+        video_copy, segments, visuals, chapters,
+        output_path=run_props,
+    )
+
+    # 也複製到 remotion/ (供 Studio 預覽)
+    remotion_props = REMOTION_DIR / "props.json"
+    shutil.copy(run_props, remotion_props)
+
+    # 蓋 props.example.json (供 Studio 預覽用 sample data)
     example = REMOTION_DIR / "props.example.json"
-    shutil.copy(props_path, example)
-    print(f"  ✅ props.json → {props_path}")
-    print(f"  ✅ props.example.json (供 Studio 預覽)")
+    shutil.copy(run_props, example)
+
+    print(f"  ✅ props.json → {run_props}")
+    print(f"  ✅ props.json (供 Studio) → {remotion_props}")
 
     return {
-        "props_path": str(props_path),
+        "run_id": run_id,
+        "props_path": str(run_props),
         "out_dir": str(out_dir),
     }
 
 
 def cmd_render(
     video_name: str,
+    run_id: str,
     frames: str | None = None,
 ) -> dict:
     """算圖: 用 Remotion 把 props.json 算成最終影片。
 
-    輸出到 workspace/<name>/output.mp4。
+    輸出到 workspace/<run_id>/output.mp4。
     """
-    out_dir = video_dir(video_name)
+    out_dir = run_dir(run_id)
     output_path = out_dir / "output.mp4"
+    props_path = out_dir / "props.json"
 
-    props_path = REMOTION_DIR / "props.json"
     if not props_path.exists():
         print(f"❌ 找不到 props.json,請先執行 build")
         sys.exit(1)
@@ -230,14 +269,7 @@ def cmd_render(
     render(props_path, output_path, frames=frames)
     print(f"  ✅ {output_path}")
 
-    return {"output_path": str(output_path)}
-
-
-def cmd_auto(video_name: str) -> None:
-    """全自動模式: 僅轉字幕+燒錄(無視覺元件)。"""
-    res = cmd_transcribe(video_name)
-    print(f"\n📌 下一步: Claude 校正字幕並設計 visuals")
-    print(f"   字幕: {res['srt_path']}")
+    return {"output_path": str(output_path), "run_id": run_id}
 
 
 # ── CLI ──────────────────────────────────────
@@ -246,8 +278,9 @@ def main() -> None:
     parser = argparse.ArgumentParser(
         description="finalCut Pipeline Orchestrator",
     )
-    parser.add_argument("command", choices=["transcribe", "build", "render", "auto"])
+    parser.add_argument("command", choices=["transcribe", "build", "render"])
     parser.add_argument("video_name", help="影片名稱(不用副檔名)")
+    parser.add_argument("--run-id", help="Run ID (自動產生: YYYY-MM-DD/HHmm_name)")
     parser.add_argument("--visuals", help="visuals JSON 檔案路徑(build 用)")
     parser.add_argument("--chapters", help="chapters JSON 檔案路徑(build 用)")
     parser.add_argument("--frames", help="算圖 frame 區間(render 用,如 450-810)")
@@ -255,13 +288,30 @@ def main() -> None:
     args = parser.parse_args()
 
     if args.command == "transcribe":
-        cmd_transcribe(args.video_name)
+        result = cmd_transcribe(args.video_name, args.run_id)
+        print(f"\n📌 Run ID: {result['run_id']}")
+        print(f"📌 下一步: 校正字幕並設計 visuals,然後執行:")
+        print(f"   python pipeline.py build \"{args.video_name}\" --run-id \"{result['run_id']}\" --visuals ... --chapters ...")
+
     elif args.command == "build":
-        cmd_build(args.video_name, args.visuals, args.chapters)
+        if not args.run_id:
+            print("❌ build 需要 --run-id (請從 transcribe 的輸出取得)")
+            sys.exit(1)
+        result = cmd_build(args.video_name, args.run_id, args.visuals, args.chapters)
+        print(f"\n📌 Run ID: {result['run_id']}")
+        print(f"📌 props.json → {result['props_path']}")
+        print(f"📌 下一步: 算圖:")
+        print(f"   python pipeline.py render \"{args.video_name}\" --run-id \"{result['run_id']}\"")
+        print(f"   或預覽片段:")
+        print(f"   python pipeline.py render \"{args.video_name}\" --run-id \"{result['run_id']}\" --frames 0-150")
+
     elif args.command == "render":
-        cmd_render(args.video_name, args.frames)
-    elif args.command == "auto":
-        cmd_auto(args.video_name)
+        if not args.run_id:
+            print("❌ render 需要 --run-id (請從 transcribe/build 的輸出取得)")
+            sys.exit(1)
+        result = cmd_render(args.video_name, args.run_id, args.frames)
+        print(f"\n✅ 完成! Run ID: {result['run_id']}")
+        print(f"   {result['output_path']}")
 
 
 if __name__ == "__main__":

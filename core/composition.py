@@ -52,11 +52,13 @@ def build_composition(
     chapters: list[dict] | None = None,
     out_width: int | None = None,
     out_height: int | None = None,
+    output_path: str | Path | None = None,
 ) -> Path:
-    """產生 remotion/props.json,回傳其路徑。
+    """產生 props.json (供 Remotion 算圖用),回傳其路徑。
 
     chapters:章節清單 [{"start": 秒, "title": "..."}],進度條會標分隔點、各章開頭跳過場卡。
     out_width/out_height:成品畫布尺寸;省略則沿用來源影片尺寸。
+    output_path: props.json 寫入位置;省略則寫到 remotion/props.json。
     """
     video_path = Path(video_path)
     meta = probe_video(video_path)
@@ -81,7 +83,7 @@ def build_composition(
         "chapters": chapters or [],
     }
 
-    props_path = REMOTION_DIR / "props.json"
+    props_path = Path(output_path) if output_path else REMOTION_DIR / "props.json"
     with open(props_path, "w", encoding="utf-8") as f:
         json.dump(props, f, ensure_ascii=False, indent=2)
     return props_path
