@@ -1,0 +1,10 @@
+# --- Core backend ---
+faster-whisper>=1.0.3      # Speech-to-text with timestamps (much faster than vanilla Whisper)
+ffmpeg-python>=0.2.0       # Call ffmpeg from Python (extract audio, burn subtitles, overlay)
+
+# --- UI (stage 1 uses Gradio) ---
+gradio>=4.44.0             # Pure-Python web UI
+
+# --- Used from stage 2 onward (listed ahead of time) ---
+anthropic>=0.39.0          # Claude API: refine subtitles + extract chart data
+matplotlib>=3.9.0          # Generate charts from structured data
