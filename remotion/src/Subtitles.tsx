@@ -15,7 +15,10 @@ export const Subtitle: React.FC<{ text: string }> = ({ text }) => {
       style={{
         justifyContent: "flex-end",
         alignItems: "center",
-        paddingBottom: "10%", // 留空間給底部的章節進度條,避免重疊
+        // 字幕位置往下一點(只留一點空間給變細的章節進度條)
+        paddingBottom: "6%",
+        // 字幕永遠在最上層,不會被字卡 / 圖表擋住
+        zIndex: 100,
       }}
     >
       <div
@@ -26,9 +29,11 @@ export const Subtitle: React.FC<{ text: string }> = ({ text }) => {
           fontWeight: 700,
           color: "white",
           textAlign: "center",
-          maxWidth: "85%",
+          // 一次只顯示一行(過長的句子已在後端切成多條字幕)
+          whiteSpace: "nowrap",
+          maxWidth: "92%",
           lineHeight: 1.3,
-          padding: "10px 26px",
+          padding: "8px 26px",
           borderRadius: 10,
           background: "rgba(0,0,0,0.45)",
           textShadow: "0 2px 6px rgba(0,0,0,0.9)",

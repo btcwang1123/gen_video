@@ -16,6 +16,62 @@ class Segment:
     text: str
 
 
+# 適合斷句的標點(優先在這些字元後換到下一條字幕)
+_BREAK_PUNCT = "，。！？、；：,.!?;…」』）)"
+
+
+def _split_text(text: str, max_chars: int) -> list[str]:
+    """把一句字幕切成多行,每行至多 max_chars 個字。
+
+    儘量在標點後斷句(讓語意完整),找不到合適標點才硬切。
+    """
+    text = text.strip()
+    if len(text) <= max_chars:
+        return [text] if text else []
+
+    lines: list[str] = []
+    i, n = 0, len(text)
+    while i < n:
+        end = min(i + max_chars, n)
+        if end < n:
+            # 在 (i, end] 視窗內找最後一個標點當斷點,但不要切得太短
+            window = text[i:end]
+            cut = max((window.rfind(p) for p in _BREAK_PUNCT), default=-1)
+            if cut >= max_chars // 2:
+                end = i + cut + 1
+        line = text[i:end].strip()
+        if line:
+            lines.append(line)
+        i = end
+    return lines
+
+
+def wrap_segments(segments: list[Segment], max_chars: int = 15) -> list[Segment]:
+    """把過長的字幕切成多條短字幕(每條至多 max_chars 字、只佔一行)。
+
+    一句被切成多行時,原本的時間區間依各行字數比例分配,
+    讓字幕一條一條接著出現,觀眾一次只看一行、比較不累。
+    """
+    out: list[Segment] = []
+    for seg in segments:
+        parts = _split_text(seg.text, max_chars)
+        if len(parts) <= 1:
+            out.append(seg)
+            continue
+        total = sum(len(p) for p in parts) or 1
+        dur = max(0.0, seg.end - seg.start)
+        t = seg.start
+        for j, p in enumerate(parts):
+            # 最後一行直接收在原本的結束時間,避免累積誤差
+            if j == len(parts) - 1:
+                seg_end = seg.end
+            else:
+                seg_end = t + dur * (len(p) / total)
+            out.append(Segment(start=round(t, 3), end=round(seg_end, 3), text=p))
+            t = seg_end
+    return out
+
+
 def _format_timestamp(seconds: float) -> str:
     """把秒數轉成 SRT 時間格式 HH:MM:SS,mmm。"""
     if seconds < 0:

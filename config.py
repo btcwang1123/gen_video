@@ -3,6 +3,7 @@
 之後接 React 前端時,這層完全不用改 —— 前後端共用同一份設定。
 """
 import shutil
+import sys
 from pathlib import Path
 
 # ── 路徑 ────────────────────────────────────
